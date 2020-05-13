@@ -19,7 +19,7 @@ type Node struct {
 	WordIndex int64  // 汉字在词表中的位置
 }
 
-// Instance 输入法实例
+// Instance 输入法实例结构
 type Instance struct {
 	// Spell string
 	Dicts map[string]map[string]*Node
@@ -58,20 +58,11 @@ func (nodes Nodes) Swap(i, j int) {
 	nodes[i], nodes[j] = nodes[j], nodes[i]
 }
 
-// SliceNodes 根据输入的拼音检索到的汉字
-var SliceNodes = make([]Node, 0)
-
-// DictsMap 所有词表,key1:拼音,key2:汉字
-type DictsMap map[string]map[string]*Node
-
 // ChanNode 用于协程间通信
 var ChanNode = make(chan Nodes, 100)
 
 // maxCount 允许返回的最大汉字个数
 var maxCount = 10
-
-// var lock sync.Mutex
-// var wg = sync.WaitGroup{}
 
 // ReadDicts 读取词表
 func ReadDicts(dicts []string) *Instance {
@@ -174,6 +165,7 @@ func (instance *Instance) FindWords(spell string) (words []string) {
 				have = true
 			}
 		}
+		// 如果检索的汉字，从channel中获取数据，并排序
 		if have {
 			for i := 0; i < cnt; i++ {
 				MatchNodes = append(MatchNodes, <-ChanNode...)
