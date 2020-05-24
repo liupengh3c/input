@@ -28,6 +28,9 @@ type Instance struct {
 // Nodes 检索到的汉字节点数据类型
 type Nodes []Node
 
+// ChanNode 用于协程间通信
+// var ChanNode = make(chan Nodes)
+
 // MatchNodes 检索到的汉字节点
 var MatchNodes = make(Nodes, 0)
 
@@ -43,14 +46,11 @@ func (nodes Nodes) Len() int {
 func (nodes Nodes) Less(i, j int) bool {
 	if nodes[i].Score != nodes[j].Score {
 		return nodes[i].Score > nodes[j].Score
-	}
-	if nodes[i].Letter != nodes[j].Letter {
+	} else if nodes[i].Letter != nodes[j].Letter {
 		return nodes[i].Letter < nodes[j].Letter
-	}
-	if nodes[i].WordIndex != nodes[j].WordIndex {
+	} else {
 		return nodes[i].WordIndex < nodes[j].WordIndex
 	}
-	return true
 }
 
 // Swap 交换位置
@@ -58,11 +58,41 @@ func (nodes Nodes) Swap(i, j int) {
 	nodes[i], nodes[j] = nodes[j], nodes[i]
 }
 
-// ChanNode 用于协程间通信
-var ChanNode = make(chan Nodes, 100)
-
 // maxCount 允许返回的最大汉字个数
 var maxCount = 10
+
+// ReadDictFile 读取单个词表文件，并返回所有词表
+func ReadDictFile(name string) ([]string, error) {
+	dicts := make([]string, 0)
+	file, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	buf := bufio.NewReader(file)
+	for {
+		line, err := buf.ReadString('\n')
+		if err != nil {
+			// 当前词表读取完毕
+			if err == io.EOF {
+				fmt.Println("last line=" + line)
+				break
+			}
+		}
+		line = strings.TrimSpace(line)
+		// 如果是空行，跳过
+		if len(line) == 0 {
+			continue
+		}
+		item := strings.Split(line, " ")
+		// 如果格式错误，跳过
+		if len(item) != 2 {
+			// fmt.Println("the file format error,file=" + name)
+			continue
+		}
+		dicts = append(dicts, line)
+	}
+	return dicts, nil
+}
 
 // ReadDicts 读取词表
 func ReadDicts(dicts []string) *Instance {
@@ -70,105 +100,88 @@ func ReadDicts(dicts []string) *Instance {
 	instance.Dicts = make(map[string]map[string]*Node)
 	for _, dict := range dicts {
 		var index int64 = 0
-		file, err := os.Open(dict)
+		sliDict, err := ReadDictFile(dict)
 		if err != nil {
-			fmt.Println("open " + dict + " fail")
 			continue
 		}
-		buf := bufio.NewReader(file)
-		for {
-			filename := strings.Split(path.Base(dict), ".")[0]
-			line, err := buf.ReadString('\n')
-			if err != nil {
-				// 当前词表读取完毕
-				if err == io.EOF {
-					fmt.Println("last line=" + line)
-					break
-				}
-				fmt.Println("read dict error,err=" + err.Error())
-				continue
-			}
-			line = strings.TrimSpace(line)
-			// 如果是空行，跳过
-			if len(line) == 0 {
-				continue
-			}
-
+		// 获取到词典对应的拼音
+		pinyin := strings.Split(path.Base(dict), ".")[0]
+		if _, ok := instance.Dicts[pinyin]; !ok {
+			instance.Dicts[pinyin] = make(map[string]*Node)
+		}
+		for _, line := range sliDict {
 			item := strings.Split(line, " ")
-			// 如果格式错误，跳过
-			if len(item) != 2 {
-				fmt.Println("the file format error")
+			// 汉字
+			word := item[0]
+			// 频率分值
+			score, err := strconv.ParseInt(item[1], 10, 32)
+			if err != nil {
 				continue
 			}
-			if _, ok := instance.Dicts[filename]; !ok {
-				instance.Dicts[filename] = make(map[string]*Node)
+			node := &Node{
+				Word:      item[0],
+				Score:     score,
+				WordIndex: index,
+				Letter:    pinyin,
 			}
-
-			// fmt.Println(item)
-			score, err := strconv.ParseInt(item[1], 10, 32)
-			instance.Dicts[filename][item[0]] = new(Node)
-			instance.Dicts[filename][item[0]].Word = item[0]
-			instance.Dicts[filename][item[0]].Score = score
-			instance.Dicts[filename][item[0]].WordIndex = index
-			instance.Dicts[filename][item[0]].Letter = filename
+			instance.Dicts[pinyin][word] = node
 			index++
 		}
 	}
 	return instance
 }
 
-func findwords(dict map[string]*Node) {
-	index := 10
+// Findword 在某个拼音下查找汉字
+func Findword(dict map[string]*Node, ch chan<- Nodes) {
+	index := maxCount
 	nodes := Nodes{}
 	for _, val := range dict {
 		nodes = append(nodes, *val)
 	}
 	sort.Sort(nodes)
-	// lock.Lock()
 
-	if len(nodes) < 10 {
+	if len(nodes) < maxCount {
 		index = len(nodes)
 	}
-	// MatchNodes = append(MatchNodes, nodes[:index]...)
-	ChanNode <- nodes[:index]
-	// lock.Unlock()
-	return
+
+	ch <- nodes[:index]
 }
 
 // FindWords 根据输入的单个汉字拼音，返回对应的汉字
 func (instance *Instance) FindWords(spell string) (words []string) {
-	cnt := 0
-	have := false
-	// 每次查找都要清空
 	words = []string{}
-	MatchNodes = Nodes{}
-	// 处理输入的拼音
+	// 处理输入的拼音,spell为空代表没有输入，直接返回
 	spell = strings.TrimSpace(spell)
 	if len(spell) == 0 {
 		return words
 	}
 
+	cnt := 0
+	words = []string{}
+	MatchNodes = Nodes{}
+	ch := make(chan Nodes)
+
 	// 如果输入的是完整拼音
 	if mapNodes, ok := instance.Dicts[spell]; ok {
-		go findwords(mapNodes)
-		MatchNodes = <-ChanNode
+		go Findword(mapNodes, ch)
+		// MatchNodes = <-ChanNode
+		MatchNodes = <-ch
 		sort.Sort(MatchNodes)
 		for _, val := range MatchNodes {
 			words = append(words, val.Word)
 		}
 	} else {
-		// 非完整拼音
+		// 非完整拼音,在所有前缀与输入相同的拼音的汉字中并发去query
 		for py, word := range instance.Dicts {
 			if strings.HasPrefix(py, spell) {
 				cnt++
-				go findwords(word)
-				have = true
+				go Findword(word, ch)
 			}
 		}
 		// 如果检索的汉字，从channel中获取数据，并排序
-		if have {
+		if cnt > 0 {
 			for i := 0; i < cnt; i++ {
-				MatchNodes = append(MatchNodes, <-ChanNode...)
+				MatchNodes = append(MatchNodes, <-ch...)
 			}
 			sort.Sort(MatchNodes)
 			for _, val := range MatchNodes {
@@ -180,19 +193,4 @@ func (instance *Instance) FindWords(spell string) (words []string) {
 		return words[:maxCount]
 	}
 	return words
-}
-
-// Loop 循环获取输入，并查找汉字
-func Loop(instance *Instance) {
-	stdin := bufio.NewReader(os.Stdin)
-	for {
-		spell, err := stdin.ReadString('\n')
-		if err != nil {
-			break
-		}
-		spell = strings.TrimRight(spell, "\n")
-		spell = strings.TrimSpace(spell)
-		words := instance.FindWords(spell)
-		fmt.Println(strings.Join(words, ", "))
-	}
 }
